@@ -17,12 +17,6 @@ module ActiveRecord::Import #:nodoc:
       true
     end
   end
-
-  class MissingColumnError < StandardError
-    def initialize(index)
-      super "Missing column for value at index #{index}"
-    end
-  end
 end
 
 class ActiveRecord::Base
@@ -216,11 +210,17 @@ class ActiveRecord::Base
       end
 
       return_obj = if is_validating
-        import_with_validations( column_names, array_of_attributes, options )
+        result, ids = import_with_validations( column_names, array_of_attributes, options )
+        result
       else
-        num_inserts = import_without_validations_or_callbacks( column_names, array_of_attributes, options )
+        ids = import_without_validations_or_callbacks( column_names, array_of_attributes, options )
+        num_inserts = ids.length
         ActiveRecord::Import::Result.new([], num_inserts)
       end
+
+      models.each_with_index { |model, i|
+        model.id = ids[i][0]
+      } if ids.present? && models.size == ids.size
 
       if options[:synchronize]
         sync_keys = options[:synchronize_keys] || [self.primary_key]
@@ -261,8 +261,8 @@ class ActiveRecord::Base
       end
       array_of_attributes.compact!
       
-      num_inserts = array_of_attributes.empty? ? 0 : import_without_validations_or_callbacks( column_names, array_of_attributes, options )
-      ActiveRecord::Import::Result.new(failed_instances, num_inserts)
+      ids = array_of_attributes.empty? ? [] : import_without_validations_or_callbacks( column_names, array_of_attributes, options )
+      [ActiveRecord::Import::Result.new(failed_instances, ids.length), ids]
     end
     
     # Imports the passed in +column_names+ and +array_of_attributes+
@@ -277,22 +277,23 @@ class ActiveRecord::Base
       columns_sql = "(#{column_names.map{|name| connection.quote_column_name(name) }.join(',')})"
       insert_sql = "INSERT #{options[:ignore] ? 'IGNORE ':''}INTO #{quoted_table_name} #{columns_sql} VALUES "
       values_sql = values_sql_for_columns_and_attributes(columns, array_of_attributes)
+
       if not supports_import?
-        number_inserted = 0
+        ids = []
         values_sql.each do |values|
-          connection.execute(insert_sql + values)
+          ids.concat connection.execute(insert_sql + values)
           number_inserted += 1
         end
       else
         # generate the sql
         post_sql_statements = connection.post_sql_statements( quoted_table_name, options )
-        
+
         # perform the inserts
-        number_inserted = connection.insert_many( [ insert_sql, post_sql_statements ].flatten, 
+        ids = connection.insert_many( [ insert_sql, post_sql_statements ].flatten,
                                                   values_sql,
                                                   "#{self.class.name} Create Many Without Validations Or Callbacks" )
       end
-      number_inserted
+      ids
     end
 
     private
@@ -303,9 +304,6 @@ class ActiveRecord::Base
       array_of_attributes.map do |arr|
         my_values = arr.each_with_index.map do |val,j|
           column = columns[j]
-
-          raise ActiveRecord::Import::MissingColumnError.new(j) if column.nil?
-
           if val.nil? && !sequence_name.blank? && column.name == primary_key
              connection.next_value_for_sequence(sequence_name)
           else

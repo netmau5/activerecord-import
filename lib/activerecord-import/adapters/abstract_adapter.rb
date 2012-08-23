@@ -29,47 +29,54 @@ module ActiveRecord::Import::AbstractAdapter
     def next_value_for_sequence(sequence_name)
       %{#{sequence_name}.nextval}
     end
-  
-    # +sql+ can be a single string or an array. If it is an array all 
+
+    # Returns [[id1], [id2],..]
+    def convert_sql_and_insert(arel, name)
+      sql, binds = sql_for_insert(to_sql(arel, []), nil, nil, nil, [])
+      exec_insert(sql, name, binds)
+    end
+
+    # +sql+ can be a single string or an array. If it is an array all
     # elements that are in position >= 1 will be appended to the final SQL.
-    def insert_many( sql, values, *args ) # :nodoc:
+    def insert_many( sql, values, *args )
       # the number of inserts default
       number_of_inserts = 0
-    
+
       base_sql,post_sql = if sql.is_a?( String )
         [ sql, '' ]
       elsif sql.is_a?( Array )
         [ sql.shift, sql.join( ' ' ) ]
       end
-    
-      sql_size = QUERY_OVERHEAD + base_sql.size + post_sql.size 
+
+      sql_size = ActiveRecord::Import::AbstractAdapter::QUERY_OVERHEAD + base_sql.size + post_sql.size
 
       # the number of bytes the requested insert statement values will take up
       values_in_bytes = values.sum {|value| value.bytesize }
-    
+
       # the number of bytes (commas) it will take to comma separate our values
       comma_separated_bytes = values.size-1
-    
+
       # the total number of bytes required if this statement is one statement
       total_bytes = sql_size + values_in_bytes + comma_separated_bytes
-    
+
       max = max_allowed_packet
-    
+
       # if we can insert it all as one statement
-      if NO_MAX_PACKET == max or total_bytes < max
+      if ActiveRecord::Import::AbstractAdapter::NO_MAX_PACKET == max or total_bytes < max
         number_of_inserts += 1
         sql2insert = base_sql + values.join( ',' ) + post_sql
-        insert( sql2insert, *args )
+        ids = convert_sql_and_insert( sql2insert, *args ).rows
       else
+        ids = []
         value_sets = self.class.get_insert_value_sets( values, sql_size, max )
         value_sets.each do |values|
           number_of_inserts += 1
           sql2insert = base_sql + values.join( ',' ) + post_sql
-          insert( sql2insert, *args )
+          ids.concat convert_sql_and_insert( sql2insert, *args ).rows
         end
       end
 
-      number_of_inserts
+      ids
     end
 
     def pre_sql_statements(options)
